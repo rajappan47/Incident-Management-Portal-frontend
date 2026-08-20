@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Card, Descriptions, Tag, Button, Form, Select, Input,
-  Space, Spin, Empty, Modal, App, Typography,
+  Space, Spin, Empty, Modal, App, Typography, Upload, List, Popconfirm,
 } from 'antd';
 import {
   EditOutlined, SendOutlined, CheckCircleOutlined, CloseCircleOutlined,
+  UploadOutlined, PaperClipOutlined, DeleteOutlined,
 } from '@ant-design/icons';
 import api from '../../services/api';
 
@@ -54,6 +55,11 @@ const RCASection = ({ incidentId, incident, currentUser, onUpdated, onRCALoaded 
   const [rejectComments, setRejectComments] = useState('');
   const [rejecting, setRejecting] = useState(false);
 
+  // 🆕 V3 — FR3-06: RCA Evidence Attachments
+  const [attachments, setAttachments] = useState([]);
+  const [loadingAttachments, setLoadingAttachments] = useState(false);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
+
   const normalizedRole = currentUser?.role?.toLowerCase()?.trim();
   const isAdmin = normalizedRole === 'admin';
   const isSupportAgent = normalizedRole === 'support agent' || normalizedRole === 'agent';
@@ -93,6 +99,54 @@ const RCASection = ({ incidentId, incident, currentUser, onUpdated, onRCALoaded 
   useEffect(() => {
     if (incidentId) fetchRCA();
   }, [incidentId, fetchRCA]);
+
+  // 🆕 V3 — FR3-06: fetch evidence attachments once an RCA is confirmed to exist
+  const fetchAttachments = useCallback(async () => {
+    setLoadingAttachments(true);
+    try {
+      const res = await api.get(`/incidents/${incidentId}/rca/attachments`);
+      setAttachments(Array.isArray(res.data) ? res.data : []);
+    } catch (err) {
+      // Non-fatal — don't block the rest of the RCA view over an attachment fetch failure
+      console.warn('Failed to load RCA attachments:', err.response?.data || err.message);
+    } finally {
+      setLoadingAttachments(false);
+    }
+  }, [incidentId]);
+
+  useEffect(() => {
+    if (rca?._id) fetchAttachments();
+  }, [rca?._id, fetchAttachments]);
+
+  // 🆕 V3 — FR3-06: reuses the same POST endpoint pattern as the rest of
+  // this file — plain axios/FormData, no new upload mechanism invented.
+  const handleUploadAttachment = async (file) => {
+    setUploadingAttachment(true);
+    try {
+      const formData = new FormData();
+      formData.append('attachment', file);
+      await api.post(`/incidents/${incidentId}/rca/attachments`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      message.success('Evidence attached');
+      await fetchAttachments();
+    } catch (err) {
+      message.error(err.response?.data?.message || 'Failed to attach evidence');
+    } finally {
+      setUploadingAttachment(false);
+    }
+    return false; // prevent antd Upload's own auto-upload — we handle it manually above
+  };
+
+  const handleDeleteAttachment = async (attachmentId) => {
+    try {
+      await api.delete(`/incidents/${incidentId}/rca/attachments/${attachmentId}`);
+      message.success('Evidence removed');
+      await fetchAttachments();
+    } catch (err) {
+      message.error(err.response?.data?.message || 'Failed to remove evidence');
+    }
+  };
 
   const openCreateOrEditForm = () => {
     form.setFieldsValue({
@@ -366,6 +420,85 @@ const RCASection = ({ incidentId, incident, currentUser, onUpdated, onRCALoaded 
           </Descriptions.Item>
         )}
       </Descriptions>
+
+      {/* 🆕 V3 — FR3-06: RCA Evidence Attachments — reuses the existing
+          incident attachment mechanism (same model, same upload middleware,
+          same file-type/size limits), just scoped to this RCA record. */}
+      <Card
+        size="small"
+        title={
+          <Space>
+            <PaperClipOutlined />
+            Evidence ({attachments.length})
+          </Space>
+        }
+        style={{ marginTop: 16 }}
+      >
+        {loadingAttachments ? (
+          <Spin size="small" />
+        ) : attachments.length === 0 ? (
+          <Text type="secondary">No evidence attached yet.</Text>
+        ) : (
+          <List
+            size="small"
+            dataSource={attachments}
+            renderItem={(att) => (
+              <List.Item
+                actions={
+                  rca.status === 'Draft' && canAuthor
+                    ? [
+                        <Popconfirm
+                          key="delete"
+                          title="Remove this evidence file?"
+                          onConfirm={() => handleDeleteAttachment(att._id)}
+                          okText="Remove"
+                          okButtonProps={{ danger: true }}
+                        >
+                          <Button size="small" danger icon={<DeleteOutlined />} />
+                        </Popconfirm>,
+                      ]
+                    : []
+                }
+              >
+                {/* 🔧 ASSUMPTION: assumes static files are served from your
+                    server root (e.g. app.use('/uploads', express.static('uploads')))
+                    and that api.defaults.baseURL ends in '/api'. I haven't seen
+                    your index.js/app.js to confirm this — if downloads 404,
+                    this URL construction is the first thing to check. */}
+                <a
+                  href={`${(api.defaults.baseURL || '').replace(/\/api\/?$/, '')}/${att.filePath}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {att.fileName}
+                </a>
+                {att.uploadedBy?.name && (
+                  <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+                    — {att.uploadedBy.name}, {new Date(att.uploadedAt).toLocaleDateString()}
+                  </Text>
+                )}
+              </List.Item>
+            )}
+          />
+        )}
+
+        {rca.status === 'Draft' && canAuthor && (
+          <Upload
+            beforeUpload={handleUploadAttachment}
+            showUploadList={false}
+            accept=".png,.jpg,.jpeg,.pdf"
+          >
+            <Button
+              icon={<UploadOutlined />}
+              loading={uploadingAttachment}
+              style={{ marginTop: 12 }}
+              size="small"
+            >
+              Attach Evidence (.png, .jpg, .pdf — max 5MB)
+            </Button>
+          </Upload>
+        )}
+      </Card>
 
       {!isEndUser && (
         <Space style={{ marginTop: 16 }} wrap>
