@@ -11,7 +11,7 @@ import { SLABadge } from '../components/common/SLABadge';
 import CommentSection from '../components/incidents/CommentSection';
 import ActivityHistory from '../components/incidents/ActivityHistory';
 import RCASection from '../components/incidents/RCASection'; // 🆕 V3 — FR3-01 / FR3-02
-import IncidentLinks from '../components/incidents/IncidentLinks'; // 🆕 V3 — FR3-08 / FR3-09
+import IncidentLinks from '../components/incidents/Incidentlinks'; // 🆕 V3 — FR3-08 / FR3-09
 import { useAuth } from '../hooks/useAuth';
 import { STATUS_OPTIONS } from '../config/constants';
 import api from '../services/api';
