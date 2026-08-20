@@ -7,7 +7,7 @@ import {
   PlusOutlined, SearchOutlined, ReloadOutlined, EyeOutlined, 
   CheckCircleOutlined, DownloadOutlined, ClockCircleOutlined 
 } from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom'; // 🆕 V3 — FR3-18 (useSearchParams)
 import AppLayout from '../components/common/AppLayout';
 import api from '../services/api';
 import * as PriorityModule from '../components/common/PriorityBadge';
@@ -48,6 +48,7 @@ const checkIsOverdue = (record) => {
 
 const Incidents = () => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams(); // 🆕 V3 — FR3-18
   const authContext = useAuth() || {};
   const user = authContext.user;
   
@@ -64,6 +65,12 @@ const Incidents = () => {
   const [selectedStatus, setSelectedStatus] = useState(null);
   const [selectedPriority, setSelectedPriority] = useState(null);
   const [selectedCategory, setSelectedCategory] = useState(null);
+
+  // 🆕 V3 — FR3-18: drill-down filters, arriving via URL query params from
+  // dashboard widgets (Agent/Team Performance, Top Root Causes, etc.)
+  const [selectedAgent, setSelectedAgent] = useState(searchParams.get('assignedAgent') || null);
+  const [selectedTeam, setSelectedTeam] = useState(searchParams.get('team') || null);
+  const [activeRcaCategory, setActiveRcaCategory] = useState(searchParams.get('rcaCategory') || null);
 
   // User details
   const normalizedRole = user?.role?.toLowerCase()?.trim();
@@ -104,9 +111,18 @@ const Incidents = () => {
 
     try {
       let response;
+      // 🆕 V3 — FR3-18: forward rcaCategory when drilling down from the Top
+      // Root Causes widget — this can't be filtered client-side like the
+      // other dropdowns, since RCA category isn't a field on the incident
+      // objects this endpoint already returns.
+      const baseQuery = 'all=true&scope=all';
+      const queryString = activeRcaCategory
+        ? `${baseQuery}&rcaCategory=${encodeURIComponent(activeRcaCategory)}`
+        : baseQuery;
+
       // Fetching with all=true and scope=all to bypass backend user-specific filters
       try {
-        response = await api.get('/incidents?all=true&scope=all');
+        response = await api.get(`/incidents?${queryString}`);
       } catch (err) {
         response = await api.get('/incidents');
       }
@@ -142,7 +158,7 @@ const Incidents = () => {
       clearTimeout(timeoutId);
       setLoading(false);
     }
-  }, []);
+  }, [activeRcaCategory]);
 
   useEffect(() => {
     fetchIncidents();
@@ -227,6 +243,11 @@ const Incidents = () => {
     setSelectedStatus(null);
     setSelectedPriority(null);
     setSelectedCategory(null);
+    // 🆕 V3 — FR3-18
+    setSelectedAgent(null);
+    setSelectedTeam(null);
+    setActiveRcaCategory(null);
+    setSearchParams({});
   };
 
   // Helper: Checks if ticket is assigned to the current user
@@ -263,7 +284,15 @@ const Incidents = () => {
       const catName = typeof item.category === 'object' ? item.category?.name : item.category;
       const matchesCategory = !selectedCategory || catName === selectedCategory;
 
-      return matchesTitle && matchesStatus && matchesPriority && matchesCategory;
+      // 🆕 V3 — FR3-18: drill-down filters from dashboard widgets. Applied
+      // client-side since assignedTo (id + team) is already present on every
+      // incident object returned by the existing fetch — no backend change
+      // needed for these two, unlike rcaCategory above.
+      const agentId = typeof item.assignedTo === 'object' ? (item.assignedTo?._id || item.assignedTo?.id) : item.assignedTo;
+      const matchesAgent = !selectedAgent || String(agentId) === String(selectedAgent);
+      const matchesTeam = !selectedTeam || item.assignedTo?.team === selectedTeam;
+
+      return matchesTitle && matchesStatus && matchesPriority && matchesCategory && matchesAgent && matchesTeam;
     });
   };
 
@@ -457,6 +486,26 @@ const Incidents = () => {
             action={
               <Button size="small" onClick={fetchIncidents}>
                 Retry
+              </Button>
+            }
+          />
+        )}
+
+        {/* 🆕 V3 — FR3-18: drill-down filter banner */}
+        {(selectedAgent || selectedTeam || activeRcaCategory) && (
+          <Alert
+            type="info"
+            showIcon
+            message={
+              activeRcaCategory
+                ? `Filtered by root cause: ${activeRcaCategory}`
+                : selectedTeam
+                ? `Filtered by team: ${selectedTeam}`
+                : `Filtered by agent`
+            }
+            action={
+              <Button size="small" onClick={handleResetFilters}>
+                Clear Filter
               </Button>
             }
           />

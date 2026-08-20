@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Row, Col, Card, Typography, Button, Space, Select, Tag, 
-  Descriptions, Spin, Tabs, App, Divider, Result 
+  Descriptions, Spin, Tabs, App, Divider, Result, Modal, Checkbox 
 } from 'antd';
 import { ArrowLeftOutlined, UserSwitchOutlined, LockOutlined } from '@ant-design/icons';
 import { useParams, useNavigate } from 'react-router-dom';
@@ -10,6 +10,8 @@ import { PriorityBadge } from '../components/common/PriorityBadge';
 import { SLABadge } from '../components/common/SLABadge';
 import CommentSection from '../components/incidents/CommentSection';
 import ActivityHistory from '../components/incidents/ActivityHistory';
+import RCASection from '../components/incidents/RCASection'; // 🆕 V3 — FR3-01 / FR3-02
+import IncidentLinks from '../components/incidents/IncidentLinks'; // 🆕 V3 — FR3-08 / FR3-09
 import { useAuth } from '../hooks/useAuth';
 import { STATUS_OPTIONS } from '../config/constants';
 import api from '../services/api';
@@ -41,12 +43,20 @@ const IncidentDetail = () => {
   const [activities, setActivities] = useState([]);
   const [agents, setAgents] = useState([]);
   const [updating, setUpdating] = useState(false);
+  const [rcaSummary, setRcaSummary] = useState(undefined); // 🆕 V3 — FR3-07 (undefined = not loaded yet, null = no RCA)
+  // 🆕 V3 — FR3-13: closure prompt state
+  const [childPromptOpen, setChildPromptOpen] = useState(false);
+  const [childPromptChildren, setChildPromptChildren] = useState([]);
+  const [childPromptSelected, setChildPromptSelected] = useState([]);
+  const [childPromptTargetStatus, setChildPromptTargetStatus] = useState(null);
+  const [applyingChildUpdates, setApplyingChildUpdates] = useState(false);
 
   // Derived user roles
   const normalizedRole = user?.role?.toLowerCase()?.trim();
   const isAdmin = normalizedRole === 'admin';
   const isSupportAgent = normalizedRole === 'support agent' || normalizedRole === 'agent';
   const isStaff = isAdmin || isSupportAgent;
+  const isEndUser = normalizedRole === 'end user' || normalizedRole === 'customer'; // 🆕 V3 — FR3-07
 
   const fetchIncidentDetails = useCallback(async () => {
     if (!id || !isValidMongoId(id)) {
@@ -123,10 +133,53 @@ const IncidentDetail = () => {
       await api.patch(`/incidents/${id}/status`, { status: newStatus });
       message.success(`Status updated to ${newStatus}`);
       fetchIncidentDetails();
+
+      // 🆕 V3 — FR3-13: Closure Prompt on Parent Resolution.
+      // If this is a major incident being Resolved/Closed, check for child
+      // incidents that aren't already in that status and offer to review them.
+      // Uses `incident` from state (pre-update) — isParentIncident doesn't
+      // change as a side effect of a status update, so this is safe without
+      // waiting on fetchIncidentDetails to complete.
+      if (incident?.isParentIncident && (newStatus === 'Resolved' || newStatus === 'Closed')) {
+        try {
+          const groupRes = await api.get(`/incidents/${id}/group`);
+          const openChildren = (groupRes.data?.children || []).filter(
+            (c) => c.status !== newStatus && c.status !== 'Closed'
+          );
+          if (openChildren.length > 0) {
+            setChildPromptChildren(openChildren);
+            setChildPromptTargetStatus(newStatus);
+            setChildPromptSelected(openChildren.map((c) => c._id || c.id));
+            setChildPromptOpen(true);
+          }
+        } catch (groupErr) {
+          // Non-fatal — the parent status change already succeeded above;
+          // don't let a failed child-check surface as an error to the user.
+          console.warn('Failed to check child incidents:', groupErr.response?.data || groupErr.message);
+        }
+      }
     } catch (err) {
       message.error(err.response?.data?.message || 'Failed to update status');
     } finally {
       setUpdating(false);
+    }
+  };
+
+  // 🆕 V3 — FR3-13: bulk-apply the same status to selected child incidents
+  const handleApplyChildStatusUpdates = async () => {
+    setApplyingChildUpdates(true);
+    try {
+      await Promise.all(
+        childPromptSelected.map((childId) =>
+          api.patch(`/incidents/${childId}/status`, { status: childPromptTargetStatus }).catch((err) => {
+            console.warn(`Failed to update child ${childId}:`, err.response?.data || err.message);
+          })
+        )
+      );
+      message.success('Child incidents updated');
+      setChildPromptOpen(false);
+    } finally {
+      setApplyingChildUpdates(false);
     }
   };
 
@@ -327,6 +380,32 @@ const IncidentDetail = () => {
                     label: `Audit History (${activities.length})`,
                     children: <ActivityHistory activities={activities} />,
                   },
+                  {
+                    // 🆕 V3 — FR3-01 / FR3-02
+                    key: '3',
+                    label: 'Root Cause Analysis',
+                    children: (
+                      <RCASection
+                        incidentId={id}
+                        incident={incident}
+                        currentUser={user}
+                        onUpdated={fetchIncidentDetails}
+                        onRCALoaded={setRcaSummary}
+                      />
+                    ),
+                  },
+                  {
+                    // 🆕 V3 — FR3-08 / FR3-09
+                    key: '4',
+                    label: 'Linked Incidents',
+                    children: (
+                      <IncidentLinks
+                        incidentId={id}
+                        currentUser={user}
+                        onUpdated={fetchIncidentDetails}
+                      />
+                    ),
+                  },
                 ]}
               />
             </Card>
@@ -342,6 +421,29 @@ const IncidentDetail = () => {
               <Descriptions column={1} layout="vertical" size="small">
                 <Descriptions.Item label="Status">
                   <Tag color="blue">{incident?.status || 'New'}</Tag>
+                </Descriptions.Item>
+
+                {/* 🆕 V3 — FR3-07: RCA status visible on the page itself, not just inside the tab */}
+                <Descriptions.Item label="RCA Status">
+                  {rcaSummary === undefined ? (
+                    <Tag>Loading…</Tag>
+                  ) : rcaSummary === null ? (
+                    <Tag>Not Started</Tag>
+                  ) : isEndUser && rcaSummary.status !== 'Approved' ? (
+                    <Tag color="processing">Pending</Tag>
+                  ) : (
+                    <Tag
+                      color={
+                        rcaSummary.status === 'Approved'
+                          ? 'success'
+                          : rcaSummary.status === 'In Review'
+                          ? 'processing'
+                          : 'default'
+                      }
+                    >
+                      {rcaSummary.status}
+                    </Tag>
+                  )}
                 </Descriptions.Item>
 
                 <Descriptions.Item label="Category">
@@ -377,6 +479,37 @@ const IncidentDetail = () => {
         </Row>
 
       </Space>
+
+      {/* 🆕 V3 — FR3-13: Closure Prompt on Parent Resolution */}
+      <Modal
+        title={`Update child incidents to "${childPromptTargetStatus}"?`}
+        open={childPromptOpen}
+        onCancel={() => setChildPromptOpen(false)}
+        onOk={handleApplyChildStatusUpdates}
+        confirmLoading={applyingChildUpdates}
+        okText={`Update Selected (${childPromptSelected.length})`}
+      >
+        <Paragraph type="secondary">
+          This is a major incident with child incidents that aren't yet {childPromptTargetStatus}.
+          Select which ones to update to the same status, or close this dialog to leave them as-is.
+        </Paragraph>
+        <Checkbox.Group
+          style={{ width: '100%' }}
+          value={childPromptSelected}
+          onChange={setChildPromptSelected}
+        >
+          <Space direction="vertical">
+            {childPromptChildren.map((c) => {
+              const childId = c._id || c.id;
+              return (
+                <Checkbox key={childId} value={childId}>
+                  {c.title} <Tag style={{ marginLeft: 8 }}>{c.status}</Tag>
+                </Checkbox>
+              );
+            })}
+          </Space>
+        </Checkbox.Group>
+      </Modal>
     </AppLayout>
   );
 };
